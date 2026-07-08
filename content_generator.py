@@ -9,7 +9,7 @@ import json
 import requests
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-5"
 
 LEVEL_PROMPTS = {
     "1-4": "1-4 sinf, juda sodda so'zlar, qisqa va aniq gaplar",
