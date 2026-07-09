@@ -117,6 +117,19 @@ async def _synthesize(text: str, out_path: str, voice: str = VOICE):
     await communicate.save(out_path)
 
 
+def _make_silence(out_path: str, duration: float):
+    """Ovoz xizmati ishlamay qolganda, shu uzunlikdagi jimlik audio fayl yasaydi."""
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+        "-t", str(duration), "-q:a", "9", "-acodec", "libmp3lame", out_path,
+    ], check=True, capture_output=True)
+
+
+def _estimate_duration(text: str) -> float:
+    words = len(text.split())
+    return max(words * 0.42 + 0.9, 3.0)
+
+
 def _audio_duration(path: str) -> float:
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -129,12 +142,20 @@ def _audio_duration(path: str) -> float:
 def build_video(scenes, output_path: str, work_dir: str, voice: str = VOICE):
     os.makedirs(work_dir, exist_ok=True)
     scene_videos = []
+    narration_failed = False
 
     for i, scene in enumerate(scenes):
         palette = PALETTE[i % len(PALETTE)]
         audio_path = os.path.join(work_dir, f"scene_{i}.mp3")
-        asyncio.run(_synthesize(scene.get("text", ""), audio_path, voice))
-        duration = max(_audio_duration(audio_path) + 0.6, 3.0)
+        text = scene.get("text", "")
+
+        try:
+            asyncio.run(_synthesize(text, audio_path, voice))
+            duration = max(_audio_duration(audio_path) + 0.6, 3.0)
+        except Exception:
+            narration_failed = True
+            duration = _estimate_duration(text)
+            _make_silence(audio_path, duration)
 
         frame_dir = os.path.join(work_dir, f"frames_{i}")
         os.makedirs(frame_dir, exist_ok=True)
@@ -165,4 +186,4 @@ def build_video(scenes, output_path: str, work_dir: str, voice: str = VOICE):
         "-i", concat_list, "-c", "copy", output_path,
     ], check=True, capture_output=True)
 
-    return output_path
+    return output_path, not narration_failed
