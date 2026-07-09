@@ -6,7 +6,9 @@ Sahnalar ro'yxatidan animatsion .mp4 video yaratadi:
 """
 
 import asyncio
+import math
 import os
+import random
 import shutil
 import subprocess
 import textwrap
@@ -40,6 +42,116 @@ def _gradient(w, h, top, bottom):
         t = y / h
         draw.line([(0, y), (w, y)], fill=_lerp(top, bottom, t))
     return img
+
+
+def _lighten(c, amount=0.35):
+    return tuple(int(c[i] + (255 - c[i]) * amount) for i in range(3))
+
+
+def _draw_decorations(img, draw, index, progress, accent):
+    """Sekin suzib yuruvchi yulduzcha/doiralar — fonni jonli qiladi."""
+    rng = random.Random(index * 97)
+    light = _lighten(accent, 0.55)
+    for _ in range(9):
+        bx = rng.uniform(60, W - 60)
+        by0 = rng.uniform(90, H - 90)
+        drift = math.sin(progress * math.pi * 2 + bx) * 10
+        by = by0 + drift
+        size = rng.uniform(4, 11)
+        shape = rng.choice(["circle", "star"])
+        alpha_layer = Image.new("RGBA", (int(size * 4), int(size * 4)), (0, 0, 0, 0))
+        d2 = ImageDraw.Draw(alpha_layer)
+        col = (*light, 90)
+        if shape == "circle":
+            d2.ellipse([0, 0, size * 2, size * 2], fill=col)
+        else:
+            cx0, cy0, r = size * 2, size * 2, size * 1.6
+            pts = []
+            for k in range(10):
+                ang = math.pi / 2 + k * math.pi / 5
+                rad = r if k % 2 == 0 else r * 0.45
+                pts.append((cx0 + rad * math.cos(ang), cy0 - rad * math.sin(ang)))
+            d2.polygon(pts, fill=col)
+        img.paste(alpha_layer, (int(bx), int(by)), alpha_layer)
+
+
+def _draw_character(img, draw, cx, cy, scale, accent, pose):
+    """Sodda, do'stona 'kitobcha' multfilm qahramoni — 3 xil poza bilan."""
+    bounce = math.sin(pose["t"] * math.pi * 2) * 6
+    cy = cy + bounce
+    body_w, body_h = 160 * scale, 190 * scale
+
+    # soya
+    draw.ellipse([cx - body_w * 0.55, cy + body_h * 0.55,
+                  cx + body_w * 0.55, cy + body_h * 0.65], fill=(0, 0, 0, 60))
+
+    # oyoqlar
+    leg_col = _lighten(accent, -0.15) if False else tuple(max(0, c - 40) for c in accent)
+    for dx in (-body_w * 0.22, body_w * 0.22):
+        draw.line([cx + dx, cy + body_h * 0.35, cx + dx, cy + body_h * 0.62],
+                   fill=leg_col, width=int(10 * scale))
+        draw.ellipse([cx + dx - 12 * scale, cy + body_h * 0.60,
+                      cx + dx + 12 * scale, cy + body_h * 0.68], fill=leg_col)
+
+    # qo'llar (poza bo'yicha)
+    arm_col = accent
+    aw = int(9 * scale)
+    if pose["id"] == 0:  # ikkala qo'l tepada — salomlashadi
+        for dx in (-1, 1):
+            draw.line([cx + dx * body_w * 0.42, cy - body_h * 0.05,
+                       cx + dx * body_w * 0.62, cy - body_h * 0.42], fill=arm_col, width=aw)
+            draw.ellipse([cx + dx * body_w * 0.62 - 10, cy - body_h * 0.42 - 10,
+                          cx + dx * body_w * 0.62 + 10, cy - body_h * 0.42 + 10], fill=arm_col)
+    elif pose["id"] == 1:  # bitta qo'l oldinga — tushuntiradi
+        draw.line([cx - body_w * 0.42, cy, cx - body_w * 0.68, cy - body_h * 0.12],
+                   fill=arm_col, width=aw)
+        draw.ellipse([cx - body_w * 0.68 - 10, cy - body_h * 0.12 - 10,
+                      cx - body_w * 0.68 + 10, cy - body_h * 0.12 + 10], fill=arm_col)
+        draw.line([cx + body_w * 0.42, cy, cx + body_w * 0.55, cy + body_h * 0.15],
+                   fill=arm_col, width=aw)
+        draw.ellipse([cx + body_w * 0.55 - 10, cy + body_h * 0.15 - 10,
+                      cx + body_w * 0.55 + 10, cy + body_h * 0.15 + 10], fill=arm_col)
+    else:  # beliga tirsak — ishonchli turadi
+        for dx in (-1, 1):
+            draw.line([cx + dx * body_w * 0.42, cy - body_h * 0.02,
+                       cx + dx * body_w * 0.55, cy + body_h * 0.18], fill=arm_col, width=aw)
+            draw.ellipse([cx + dx * body_w * 0.55 - 10, cy + body_h * 0.18 - 10,
+                          cx + dx * body_w * 0.55 + 10, cy + body_h * 0.18 + 10], fill=arm_col)
+
+    # tana (kitobcha)
+    draw.rounded_rectangle(
+        [cx - body_w / 2, cy - body_h / 2, cx + body_w / 2, cy + body_h / 2],
+        radius=body_w * 0.22, fill=accent,
+    )
+    # "sahifa" yuzi
+    face_w, face_h = body_w * 0.72, body_h * 0.55
+    draw.rounded_rectangle(
+        [cx - face_w / 2, cy - body_h * 0.28, cx + face_w / 2, cy - body_h * 0.28 + face_h],
+        radius=face_w * 0.18, fill=(251, 246, 234),
+    )
+    # markazdagi "muqova chizig'i"
+    draw.line([cx, cy - body_h * 0.45, cx, cy + body_h * 0.45],
+               fill=tuple(max(0, c - 35) for c in accent), width=int(3 * scale))
+
+    # ko'zlar
+    eye_y = cy - body_h * 0.05
+    for dx in (-face_w * 0.18, face_w * 0.18):
+        r = 13 * scale
+        draw.ellipse([cx + dx - r, eye_y - r, cx + dx + r, eye_y + r], fill=(30, 30, 40))
+        draw.ellipse([cx + dx - r * 0.35 + 3, eye_y - r * 0.35 - 3,
+                      cx + dx + r * 0.35 + 3, eye_y + r * 0.35 - 3], fill=(255, 255, 255))
+
+    # tabassum
+    smile_y = cy + body_h * 0.10
+    draw.arc([cx - face_w * 0.22, smile_y - 14 * scale, cx + face_w * 0.22, smile_y + 18 * scale],
+              start=20, end=160, fill=(30, 30, 40), width=int(4 * scale))
+
+    # yonoqlar
+    for dx in (-face_w * 0.32, face_w * 0.32):
+        r = 9 * scale
+        blush = Image.new("RGBA", (int(r * 2), int(r * 2)), (0, 0, 0, 0))
+        ImageDraw.Draw(blush).ellipse([0, 0, r * 2, r * 2], fill=(232, 99, 124, 90))
+        img.paste(blush, (int(cx + dx - r), int(eye_y + 10 - r)), blush)
 
 
 def _wrap(draw, text, font, max_width):
@@ -83,14 +195,21 @@ def _draw_frame(scene, index, total, progress, palette):
     draw.text((46, 50), f"SAHNA {index + 1} / {total}", font=font_mono,
                fill=(255, 255, 255, 160))
 
-    # emoji / icon placeholder (colored circle with scene number, since
-    # color-emoji glyphs are not reliably renderable via Pillow/DejaVu)
-    cx, cy, r = W // 2, int(H * 0.34), 70
-    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=palette["accent"])
+    _draw_decorations(img, draw, index, progress, palette["accent"])
+
+    # multfilm personaji
+    pose = {"id": index % 3, "t": progress}
+    _draw_character(img, draw, W // 2, int(H * 0.34), 1.15, palette["accent"], pose)
+
+    # sahna raqami — kichik nishon
+    badge_r = 22
+    bx, by = W // 2 + 95, int(H * 0.34) - 95
+    draw.ellipse([bx - badge_r, by - badge_r, bx + badge_r, by + badge_r],
+                 fill=(251, 246, 234))
     num_text = str(index + 1)
-    bbox = draw.textbbox((0, 0), num_text, font=font_emoji)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    draw.text((cx - tw / 2, cy - th / 2 - bbox[1]), num_text, font=font_emoji, fill=(20, 20, 30))
+    nb = draw.textbbox((0, 0), num_text, font=font_heading)
+    draw.text((bx - (nb[2] - nb[0]) / 2, by - (nb[3] - nb[1]) / 2 - nb[1]),
+               num_text, font=font_heading, fill=palette["accent"])
 
     # heading
     heading = scene.get("heading", "")
