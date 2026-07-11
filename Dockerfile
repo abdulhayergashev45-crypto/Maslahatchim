@@ -1,18 +1,21 @@
-# ---- 1-bosqich: tayyor Telegram Bot API server binarysini olish ----
+# ---- 1-bosqich: tayyor Telegram Bot API server binarysini olish (Alpine asosida) ----
 FROM aiogram/telegram-bot-api:latest AS tbaserver
 
-# ---- 2-bosqich: asosiy Python muhiti ----
-FROM python:3.11-slim
+# ---- 2-bosqich: asosiy Python muhiti — ENDI HAM ALPINE (mos kelishi uchun) ----
+FROM python:3.11-alpine
 
-# telegram-bot-api ishga tushishi uchun kerakli kutubxonalar + curl (health-check uchun)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Build va runtime uchun kerakli paketlar
+RUN apk add --no-cache \
     ffmpeg \
-    fonts-dejavu \
+    font-dejavu \
     curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    gcc \
+    musl-dev \
+    libffi-dev \
+    python3-dev
 
-# Tayyor binaryni 1-bosqichdan ko'chirib olamiz
+# Tayyor binaryni 1-bosqichdan ko'chirib olamiz (endi ikkalasi ham Alpine/musl)
 COPY --from=tbaserver /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
 
 WORKDIR /app
