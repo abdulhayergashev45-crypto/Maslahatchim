@@ -229,7 +229,8 @@ def main():
     if use_local_api:
         local_base = os.environ.get("LOCAL_BOT_API_URL", "http://localhost:8081")
         builder = builder.base_url(f"{local_base}/bot").base_file_url(f"{local_base}/file/bot")
-        logger.info("Local Bot API server ishlatilyapti: %s", local_base)
+        builder = builder.local_mode(True)
+        logger.info("Local Bot API server ishlatilyapti (local_mode): %s", local_base)
 
     app = builder.build()
 
