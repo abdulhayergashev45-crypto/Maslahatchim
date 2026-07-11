@@ -230,6 +230,14 @@ def main():
         local_base = os.environ.get("LOCAL_BOT_API_URL", "http://localhost:8081")
         builder = builder.base_url(f"{local_base}/bot").base_file_url(f"{local_base}/file/bot")
         builder = builder.local_mode(True)
+        # Katta fayllarni qabul qilish/yuborish uchun kutish vaqtlarini uzaytiramiz
+        # (standart 5 soniya 100+ MB fayllar uchun yetarli emas)
+        builder = (
+            builder.read_timeout(300)
+            .write_timeout(300)
+            .connect_timeout(60)
+            .pool_timeout(300)
+        )
         logger.info("Local Bot API server ishlatilyapti (local_mode): %s", local_base)
 
     app = builder.build()
