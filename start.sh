@@ -16,6 +16,7 @@ telegram-bot-api \
   --http-port=8081 \
   --dir=/data/telegram-bot-api \
   --temp-dir=/data/telegram-bot-api/temp \
+  --local \
   --max-webhook-connections=0 &
 
 # Server tayyor bo'lguncha kutamiz
