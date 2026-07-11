@@ -218,7 +218,8 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
 
 # ---------- Ilovani ishga tushirish ----------
-    def main():
+
+def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN topilmadi. .env faylini tekshiring.")
 
