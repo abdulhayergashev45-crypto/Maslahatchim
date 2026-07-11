@@ -45,7 +45,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 # Suhbat holatlari
 CHOOSING_RANGE, TYPING_RANGE = range(2)
 
-MAX_PDF_MB = 20
+MAX_PDF_MB = int(os.environ.get("MAX_PDF_MB", "20"))
 LARGE_BOOK_PAGES = 40
 
 
@@ -218,12 +218,19 @@ async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, u
 
 
 # ---------- Ilovani ishga tushirish ----------
-
-def main():
+    def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError("TELEGRAM_BOT_TOKEN topilmadi. .env faylini tekshiring.")
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
+
+    use_local_api = os.environ.get("USE_LOCAL_BOT_API", "false").lower() == "true"
+    if use_local_api:
+        local_base = os.environ.get("LOCAL_BOT_API_URL", "http://localhost:8081")
+        builder = builder.base_url(f"{local_base}/bot").base_file_url(f"{local_base}/file/bot")
+        logger.info("Local Bot API server ishlatilyapti: %s", local_base)
+
+    app = builder.build()
 
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Document.PDF, handle_document)],
