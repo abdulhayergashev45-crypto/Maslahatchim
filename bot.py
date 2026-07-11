@@ -1,193 +1,244 @@
 """
-Darslikdan videoga/slaydga — Telegram bot.
+PDF -> Taqdimot Telegram bot.
 
-Oqim:
-  /start -> yosh guruhini tanlash -> matn yoki rasm yuborish
-  -> formatni tanlash (slayd/video) -> Claude API -> fayl yaratish -> yuborish
+Foydalanuvchi PDF kitob yuboradi, bot kerakli qismini AI yordamida
+qisqartirib, tayyor .pptx taqdimot qilib qaytaradi.
 
 Ishga tushirish:
-  1) .env faylida TELEGRAM_BOT_TOKEN va ANTHROPIC_API_KEY ni to'ldiring
-  2) pip install -r requirements.txt  (va ffmpeg tizimga o'rnatilgan bo'lsin)
-  3) python bot.py
+    1. .env faylini to'ldiring (.env.example asosida)
+    2. pip install -r requirements.txt
+    3. python bot.py
 """
 
-import asyncio
 import logging
 import os
+import re
 import tempfile
 
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ChatAction
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ContextTypes, ConversationHandler, filters,
+    Application,
+    CallbackQueryHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    CommandHandler,
+    filters,
 )
 
-from content_generator import generate_scenes_from_text, generate_scenes_from_image
-from slide_builder import build_pptx
-from video_builder import build_video
+import pdf_utils
+import ai_utils
+import pptx_utils
 
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"].strip()
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
 logger = logging.getLogger(__name__)
 
-CHOOSE_LEVEL, WAITING_CONTENT, CHOOSE_FORMAT = range(3)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-LEVEL_LABELS = {"1-4": "1–4 sinf", "5-9": "5–9 sinf", "10-11": "10–11 sinf"}
+# Suhbat holatlari
+CHOOSING_RANGE, TYPING_RANGE = range(2)
 
+MAX_PDF_MB = 20
+LARGE_BOOK_PAGES = 40
+
+
+# ---------- Buyruqlar ----------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    keyboard = [[InlineKeyboardButton(label, callback_data=f"level:{key}")]
-                for key, label in LEVEL_LABELS.items()]
     await update.message.reply_text(
-        "Salom! Men darslik matnini (yoki rasmini) sodda tildagi animatsion "
-        "video yoki taqdimotga aylantiraman.\n\n"
-        "Avval o'quvchilar yosh guruhini tanlang:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "Assalomu alaykum! 👋\n\n"
+        "Men PDF darslik yoki kitobni taqdimotga aylantirib beraman.\n\n"
+        "Boshlash uchun menga PDF fayl yuboring."
     )
-    return CHOOSE_LEVEL
 
 
-async def on_level_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    level_key = query.data.split(":", 1)[1]
-    context.user_data["level"] = level_key
-    await query.edit_message_text(
-        f"Daraja: {LEVEL_LABELS[level_key]} ✅\n\n"
-        "Endi darslik matnini yuboring — yozib yuborishingiz ham, "
-        "sahifaning suratini yuborishingiz ham mumkin."
-    )
-    return WAITING_CONTENT
-
-
-async def on_content_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.photo:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        image_bytes = bytes(await file.download_as_bytearray())
-        context.user_data["content_type"] = "image"
-        context.user_data["image_bytes"] = image_bytes
-        context.user_data["media_type"] = "image/jpeg"
-    elif update.message.text:
-        context.user_data["content_type"] = "text"
-        context.user_data["text"] = update.message.text
-    else:
-        await update.message.reply_text("Iltimos, matn yoki rasm yuboring.")
-        return WAITING_CONTENT
-
-    keyboard = [
-        [InlineKeyboardButton("🖼️ Slayd (PPTX)", callback_data="format:slide")],
-        [InlineKeyboardButton("🎬 Animatsion video", callback_data="format:video")],
-    ]
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Qabul qildim ✅ Endi qaysi formatda tayyorlab beray?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "📖 Qanday ishlataman:\n"
+        "1. Menga PDF fayl yuboring\n"
+        "2. Butun kitobni yoki kerakli sahifa oralig'ini tanlang\n"
+        "3. Bir necha daqiqa kuting — AI matnni tahlil qilib, taqdimot tayyorlaydi\n"
+        "4. Tayyor .pptx faylni oling\n\n"
+        "/start — botni qayta boshlash\n"
+        "/cancel — joriy amalni bekor qilish"
     )
-    return CHOOSE_FORMAT
-
-
-async def on_format_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    fmt = query.data.split(":", 1)[1]
-    level = context.user_data.get("level", "5-9")
-
-    status_msg = await query.edit_message_text("Sahnalar tayyorlanmoqda… ⏳")
-
-    try:
-        if context.user_data.get("content_type") == "image":
-            scenes = generate_scenes_from_image(
-                context.user_data["image_bytes"], context.user_data["media_type"],
-                level, ANTHROPIC_API_KEY,
-            )
-        else:
-            scenes = generate_scenes_from_text(
-                context.user_data["text"], level, ANTHROPIC_API_KEY,
-            )
-    except Exception as exc:
-        logger.exception("Sahnalar yaratishda xato")
-        await status_msg.edit_text(f"Xatolik yuz berdi: {exc}\n\nQaytadan boshlash uchun /start ni bosing.")
-        return ConversationHandler.END
-
-    title = scenes[0].get("heading", "Darslik") if scenes else "Darslik"
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            if fmt == "slide":
-                await status_msg.edit_text("Slaydlar tayyorlanmoqda… 🖼️")
-                output_path = os.path.join(tmp, "darslik.pptx")
-                await asyncio.to_thread(build_pptx, scenes, title, output_path)
-                await context.bot.send_document(
-                    chat_id=update.effective_chat.id,
-                    document=open(output_path, "rb"),
-                    filename="darslik.pptx",
-                    caption=f"{len(scenes)} slaydli taqdimot tayyor ✅",
-                )
-            else:
-                await status_msg.edit_text(
-                    "Video tayyorlanmoqda… 🎬 (bu bir necha daqiqa vaqt olishi mumkin)"
-                )
-                output_path = os.path.join(tmp, "darslik.mp4")
-                output_path, narration_ok = await asyncio.to_thread(
-                    build_video, scenes, output_path, os.path.join(tmp, "work")
-                )
-                caption = f"{len(scenes)} sahnali animatsion video tayyor ✅"
-                if not narration_ok:
-                    caption += "\n\n⚠️ Ovoz xizmati vaqtincha ishlamadi, shuning uchun video ovozsiz (faqat matn/animatsiya bilan) tayyorlandi."
-                await context.bot.send_video(
-                    chat_id=update.effective_chat.id,
-                    video=open(output_path, "rb"),
-                    caption=caption,
-                )
-        await status_msg.delete()
-    except Exception as exc:
-        logger.exception("Fayl yaratishda xato")
-        await status_msg.edit_text(f"Fayl tayyorlashda xatolik: {exc}\n\nQaytadan boshlash uchun /start ni bosing.")
-        return ConversationHandler.END
-
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text="Yana video/slayd tayyorlash uchun /start ni bosing.",
-    )
-    return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("Bekor qilindi. Qayta boshlash uchun /start ni bosing.")
+    await update.message.reply_text("Bekor qilindi. Yangi PDF yuborishingiz mumkin.")
     return ConversationHandler.END
 
 
-async def setup_menu(application):
-    await application.bot.set_my_commands([
-        ("start", "Yangi darslik video/slayd yaratish"),
-        ("cancel", "Joriy jarayonni bekor qilish"),
-    ])
+# ---------- PDF qabul qilish ----------
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+
+    if not document.file_name.lower().endswith(".pdf"):
+        await update.message.reply_text("Iltimos, faqat PDF fayl yuboring.")
+        return ConversationHandler.END
+
+    if document.file_size > MAX_PDF_MB * 1024 * 1024:
+        await update.message.reply_text(
+            f"Fayl juda katta ({MAX_PDF_MB} MB dan oshmasligi kerak)."
+        )
+        return ConversationHandler.END
+
+    await update.message.chat.send_action(ChatAction.TYPING)
+
+    tmp_dir = tempfile.mkdtemp()
+    pdf_path = os.path.join(tmp_dir, "input.pdf")
+    tg_file = await document.get_file()
+    await tg_file.download_to_drive(pdf_path)
+
+    try:
+        page_count = pdf_utils.get_page_count(pdf_path)
+    except Exception:
+        await update.message.reply_text(
+            "Faylni o'qib bo'lmadi. PDF buzilgan bo'lishi mumkin."
+        )
+        return ConversationHandler.END
+
+    context.user_data["pdf_path"] = pdf_path
+    context.user_data["page_count"] = page_count
+
+    keyboard = [
+        [InlineKeyboardButton("📘 Butun kitob", callback_data="range:full")],
+        [InlineKeyboardButton("📑 Sahifa oralig'ini kiritaman", callback_data="range:custom")],
+    ]
+    warn = ""
+    if page_count > LARGE_BOOK_PAGES:
+        warn = (
+            f"\n\n⚠️ Kitob {page_count} sahifadan iborat — butun kitobni tanlasangiz, "
+            "natija juda umumiy bo'lishi mumkin. Aniqroq taqdimot uchun kerakli bo'lim "
+            "sahifalarini kiritishni tavsiya qilamiz."
+        )
+
+    await update.message.reply_text(
+        f"Fayl qabul qilindi ✅\nJami sahifalar: {page_count}{warn}\n\n"
+        "Qaysi qismidan taqdimot tayyorlaylik?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return CHOOSING_RANGE
+
+
+async def choose_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "range:full":
+        context.user_data["start_page"] = None
+        context.user_data["end_page"] = None
+        await query.edit_message_text("Butun kitob tanlandi. Ishlov berilmoqda... ⏳")
+        return await process_and_send(update, context, use_query=True)
+
+    await query.edit_message_text(
+        "Sahifa oralig'ini kiriting.\n"
+        "Masalan: 8-33 (8-sahifadan 33-sahifagacha)\n\n"
+        f"(Jami sahifalar: {context.user_data.get('page_count')})"
+    )
+    return TYPING_RANGE
+
+
+async def typed_range(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    match = re.match(r"^(\d+)\s*-\s*(\d+)$", text)
+
+    if not match:
+        await update.message.reply_text(
+            "Formatni tushunmadim. Iltimos, shunday yozing: 8-33"
+        )
+        return TYPING_RANGE
+
+    start_page, end_page = int(match.group(1)), int(match.group(2))
+    page_count = context.user_data.get("page_count", 0)
+
+    if start_page < 1 or end_page > page_count or start_page > end_page:
+        await update.message.reply_text(
+            f"Noto'g'ri oraliq. 1 dan {page_count} gacha kiriting."
+        )
+        return TYPING_RANGE
+
+    context.user_data["start_page"] = start_page
+    context.user_data["end_page"] = end_page
+
+    await update.message.reply_text("Qabul qilindi. Ishlov berilmoqda... ⏳")
+    return await process_and_send(update, context, use_query=False)
+
+
+# ---------- Asosiy ishlov ----------
+
+async def process_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, use_query: bool):
+    chat = update.callback_query.message.chat if use_query else update.message.chat
+    await chat.send_action(ChatAction.UPLOAD_DOCUMENT)
+
+    pdf_path = context.user_data["pdf_path"]
+    start_page = context.user_data.get("start_page")
+    end_page = context.user_data.get("end_page")
+
+    try:
+        raw_text = pdf_utils.extract_text(pdf_path, start_page, end_page)
+        raw_text = pdf_utils.truncate_for_model(raw_text)
+
+        if len(raw_text.strip()) < 200:
+            await chat.send_message(
+                "Bu qismda yetarlicha matn topilmadi (rasm asosidagi sahifa bo'lishi mumkin)."
+            )
+            return ConversationHandler.END
+
+        plan = ai_utils.generate_slide_plan(raw_text)
+
+        tmp_out = tempfile.mktemp(suffix=".pptx")
+        pptx_utils.build_presentation(plan, tmp_out)
+
+        await chat.send_document(
+            document=open(tmp_out, "rb"),
+            filename="taqdimot.pptx",
+            caption=f"Tayyor! 🎉 \"{plan.get('deck_title', 'Taqdimot')}\"",
+        )
+
+    except Exception as exc:
+        logger.exception("Ishlov berishda xatolik")
+        await chat.send_message(
+            "Kechirasiz, ishlov berishda xatolik yuz berdi. Qaytadan urinib ko'ring.\n"
+            f"(texnik tafsilot: {exc})"
+        )
+    finally:
+        context.user_data.clear()
+
+    return ConversationHandler.END
+
+
+# ---------- Ilovani ishga tushirish ----------
 
 def main():
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(setup_menu).build()
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN topilmadi. .env faylini tekshiring.")
 
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Document.PDF, handle_document)],
         states={
-            CHOOSE_LEVEL: [CallbackQueryHandler(on_level_chosen, pattern=r"^level:")],
-            WAITING_CONTENT: [
-                MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND), on_content_received)
-            ],
-            CHOOSE_FORMAT: [CallbackQueryHandler(on_format_chosen, pattern=r"^format:")],
+            CHOOSING_RANGE: [CallbackQueryHandler(choose_range, pattern="^range:")],
+            TYPING_RANGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, typed_range)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    app.add_handler(conv)
-    logger.info("Bot ishga tushdi.")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(conv_handler)
+
+    logger.info("Bot ishga tushdi...")
     app.run_polling()
 
 
